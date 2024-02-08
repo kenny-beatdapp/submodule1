@@ -1,0 +1,253 @@
+name: run-ci-workflow
+on:
+  pull_request:
+    branches:
+      - staging
+    types: [opened, synchronize]
+concurrency:
+  group: ${{ github.head_ref }}
+  cancel-in-progress: true
+env:
+  PROJECT_NODE_VERSION: 16
+  STAGING_PROVIDER_NAME: "projects/137177126435/locations/global/workloadIdentityPools/pl-schemi-s/providers/pr-schemi-s"
+  STAGING_SA_EMAIL: "sa-schemi-runner-s@fraud-analysis-staging.iam.gserviceaccount.com"
+  CI_PROVIDER_NAME: "projects/684608944517/locations/global/workloadIdentityPools/pl-schemi-c/providers/pr-schemi-c"
+  CI_SA_EMAIL: "sa-schemi-runner-c@fraud-analysis-ci.iam.gserviceaccount.com"
+jobs:
+  validate_project_structure:
+    name: validate_project_structure
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout branch
+        uses: actions/checkout@v4
+      - name: check diffs in managed migrations
+        id: managed_migrations_diff
+        uses: technote-space/get-diff-action@v6
+        with:
+          RELATIVE: migrations/
+          PATTERNS: |
+            live/**/*
+            prod_prep/**/*
+      - name: check if changes have been made to managed migrations folders
+        if: steps.managed_migrations_diff.outputs.diff
+        run: |
+          echo "You dun goofed and committed a change in a CI-managed directory!" &&
+          exit 1
+  run_generic_tests:
+    name: run_generic_tests
+    needs: validate_project_structure
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout branch
+        uses: actions/checkout@v4
+      - name: setup .env file
+        run: |
+          touch .env
+          echo STAGE=ci >> .env
+          echo LIVE=true >> .env
+      - name: setup node on runner
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.PROJECT_NODE_VERSION }}
+      - name: setup ci gcp credentials
+        id: test-auth-ci
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.CI_PROVIDER_NAME }}
+          service_account: ${{ env.CI_SA_EMAIL }}
+      - name: install package dependencies
+        run: |
+          npm ci
+      - name: build features map
+        run: |
+          npm run generate_features_map
+      - name: run generic dynamic feature tests
+        run: |
+          npm run test_single_file \
+          ./dynamic-features/test/feature-categories/abstract-feature-category.test.js \
+          ./dynamic-features/test/services/dynamic-features.test.js
+  run_dynamic_feature_basic_tests:
+    name: run_dynamic_feature_basic_tests
+    needs: validate_project_structure
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout branch
+        uses: actions/checkout@v4
+      - name: setup .env file
+        run: |
+          touch .env
+          echo STAGE=ci >> .env
+          echo LIVE=true >> .env
+      - name: setup node on runner
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.PROJECT_NODE_VERSION }}
+      - name: setup ci gcp credentials
+        id: test-auth-ci
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.CI_PROVIDER_NAME }}
+          service_account: ${{ env.CI_SA_EMAIL }}
+      - name: install package dependencies
+        run: |
+          npm ci
+      - name: build features map
+        run: |
+          npm run generate_features_map
+      - name: run dynamic feature basic tests
+        run: |
+          npm run test_single_file ./dynamic-features/test/feature-categories/simple/**/*.test.js
+  run_unified_feature_category_tests:
+    name: run_unified_feature_category_tests
+    needs: validate_project_structure
+    strategy:
+      matrix:
+        category: [artist, device, user]
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout branch
+        uses: actions/checkout@v4
+      - name: setup .env file
+        run: |
+          touch .env
+          echo STAGE=ci >> .env
+          echo LIVE=true >> .env
+      - name: setup node on runner
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.PROJECT_NODE_VERSION }}
+      - name: setup ci gcp credentials
+        id: test-auth-ci
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.CI_PROVIDER_NAME }}
+          service_account: ${{ env.CI_SA_EMAIL }}
+      - name: install package dependencies
+        run: |
+          npm ci
+      - name: build features map
+        run: |
+          npm run generate_features_map
+      - name: run unified feature category tests
+        run: |
+          npm run test_single_file ./sql/unified/features/${{ matrix.category }}/**/*.test.js
+  setup_provider_specific_tests:
+    name: setup_provider_specific_tests
+    needs: validate_project_structure
+    outputs:
+      providerMappings: ${{ steps.getMappings.outputs.providerMappings }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Branch
+        uses: actions/checkout@v4
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v40
+      - name: Get Changed Providers
+        id: getMappings
+        run: |
+          npm run gha:get_changed_providers '${{ steps.changed-files.outputs.all_changed_files }}'
+  run_provider_specific_tests:
+    name: run_provider_specific_tests
+    needs: setup_provider_specific_tests
+    if: ${{ needs.setup_provider_specific_tests.outputs.providerMappings != '[]' && needs.setup_provider_specific_tests.outputs.providerMappings != '' }}
+    strategy:
+      matrix:
+        provider: ${{ fromJSON(needs.setup_provider_specific_tests.outputs.providerMappings) }}
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout branch
+        uses: actions/checkout@v4
+      - name: setup .env file
+        run: |
+          touch .env
+          echo STAGE=ci >> .env
+          echo LIVE=true >> .env
+      - name: setup node on runner
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.PROJECT_NODE_VERSION }}
+      - name: setup ci gcp credentials
+        id: test-auth-ci
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.CI_PROVIDER_NAME }}
+          service_account: ${{ env.CI_SA_EMAIL }}
+      - name: install package dependencies
+        run: |
+          npm ci
+      - name: build features map
+        run: |
+          npm run generate_features_map
+      - name: run provider specific tests
+        run: |
+          npm run test_single_file ./sql/${{ matrix.provider }}/**/*.test.js
+  test_schema_integrity:
+    name: test_schema_integrity
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout branch
+        uses: actions/checkout@v4
+      - name: setup .env file
+        run: |
+          touch .env
+          echo STAGE=ci >> .env
+          echo LIVE=true >> .env
+      - name: install package dependencies
+        run: |
+          npm ci
+      - name: set ci workflow id
+        run: |
+          echo "CI_WORKFLOW_ID=$GITHUB_RUN_ID" >> $GITHUB_ENV
+          echo "Starting workflow run $GITHUB_RUN_ID..."
+      - name: setup staging gcp credentials
+        id: auth-staging
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.STAGING_PROVIDER_NAME }}
+          service_account: ${{ env.STAGING_SA_EMAIL }}
+      - name: validate prepped migrations
+        run: |
+          npm run gha:validate_new_migrations
+      - name: setup ci gcp credentials
+        id: auth-ci
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.CI_PROVIDER_NAME }}
+          service_account: ${{ env.CI_SA_EMAIL }}
+      - name: Build featuresMap
+        run: |
+          npm run generate_features_map
+      - name: setup test variables
+        run: |
+          npm run gha:setup_test_variables &&
+          echo "CI_START_DATE=$(jq .ci_start_date ./test_vars.json -r)" >> .env &&
+          echo "CI_END_DATE=$(jq .ci_end_date ./test_vars.json -r)" >> .env &&
+          echo "STATIC_UUID=$(jq .static_uuid ./test_vars.json -r)" >> .env &&
+          npm run gha:teardown_test_variables
+      - name: generate_db_schema
+        id: generate_db_schema
+        run: |
+          npm run gha:generate_schema
+      - name: test new migration(s) up/down commands
+        run: |
+          npm run gha:test_new_migrations
+      - name: destroy ci db schema
+        if: always()
+        run: |
+          npm run gha:teardown_schema
